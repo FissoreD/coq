@@ -71,6 +71,8 @@ val instances_exn : env -> evar_map -> GlobRef.t -> instance list
 
 val typeclasses : unit -> typeclass list
 val all_instances : unit -> instance list
+val get_instance_from_gref : GlobRef.t -> instance
+(** Returns the implementation of the instance from its gref *)
 
 val load_class : typeclass -> unit
 
@@ -100,6 +102,7 @@ val instance_impl : instance -> GlobRef.t
 val hint_priority : instance -> int option
 
 val is_class : GlobRef.t -> bool
+val is_instance : GlobRef.t -> bool
 
 (** Returns the term and type for the given instance of the parameters and fields
    of the type class. *)
