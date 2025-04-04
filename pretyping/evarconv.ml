@@ -270,7 +270,7 @@ let activate_hook ~name =
 let apply_hooks env sigma proj pat =
   List.find_map (fun name ->
     try CString.Map.get name !all_hooks env sigma proj pat
-    with e when CErrors.noncritical e -> anomaly Pp.(str "CS hook " ++ str name ++ str " exploded")) !active_hooks
+    with e when CErrors.noncritical e -> raise Not_found) !active_hooks
 
 let decompose_proj ?metas env sigma (t1, sk1) =
    (* I only recognize ConstRef projections since these are the only ones for which
@@ -658,13 +658,44 @@ module Cs_keys_cache = struct
     if l2r then clear_left c else clear_left (flip c)
 end
 
+let infer_conv_noticing_evars ~pb ~ts env sigma t1 t2 =
+  let has_evar = ref false in
+  let evar_expand ev =
+    let v = existential_expand_value0 sigma ev in
+    let () = match v with
+    | CClosure.EvarUndefined _ -> has_evar := true
+    | CClosure.EvarDefined _ -> ()
+    in
+    v
+  in
+  let evar_handler = { (Evd.evar_handler sigma) with evar_expand } in
+  let conv = { genconv = fun pb ~l2r sigma -> Conversion.generic_conv pb ~l2r ~evars:evar_handler } in
+  match infer_conv_gen conv ~catch_incon:false ~pb ~ts env sigma t1 t2 with
+  | Some sigma -> Some (Success sigma)
+  | None ->
+    if !has_evar then None
+    else Some (UnifFailure (sigma, ConversionFailed (env,t1,t2)))
+  | exception UGraph.UniverseInconsistency e ->
+    if !has_evar then None
+    else Some (UnifFailure (sigma, UnifUnivInconsistency e))
+
 let rec evar_conv_x flags env evd pbty term1 term2 =
   let t = Random.int 1073741823 in
   let () = debug_unification (fun () -> Pp.(v 0 (str "evar_conv_x: " ++ int t ++ cut () ++ Termops.Internal.print_constr_env env evd term1 ++ cut () ++ Termops.Internal.print_constr_env env evd term2 ++ cut ()))) in
   let term1 = whd_head_evar evd term1 in
   let term2 = whd_head_evar evd term2 in
-  let () = debug_unification (fun () -> Pp.(v 0 (str "evar_conv_x after whd_head_evar " ++ int t ++ cut () ++ Termops.Internal.print_constr_env env evd term1 ++ cut () ++ Termops.Internal.print_constr_env env evd term2 ++ cut ()))) in
+  (* Maybe convertible but since reducing can erase evars which [evar_apprec]
+     could have found, we do it only if the terms are free of evar.
+     Note: incomplete heuristic... *)
+  let ground_test =
+    if is_ground_term evd term1 && is_ground_term evd term2 then
+      infer_conv_noticing_evars ~pb:pbty ~ts:flags.closed_ts env evd term1 term2
+    else None
+  in
   let r =
+    match ground_test with
+    | Some result -> result
+    | None ->
       (* Until pattern-unification is used consistently, use nohdbeta to not
            destroy beta-redexes that can be used for 1st-order unification *)
         let term1 = apprec_nohdbeta flags env evd term1 in
@@ -1054,6 +1085,16 @@ and evar_eqappr_x ?(rhs_is_already_stuck = false) flags env evd pbty
 
         | Proj (p, _, c), Proj (p', _, c') when QProjection.Repr.equal env (Projection.repr p) (Projection.repr p') ->
           let f1 i =
+            let red =
+              (match kind i c with
+              | App (h,_) when isConstruct i h -> true
+              | Construct _ -> true
+              | _ -> false) &&
+              (match kind i c' with
+              | App (h,_) when isConstruct i h -> true
+              | Construct _ -> true
+              | _ -> false) in
+            if red then UnifFailure (evd,NotSameHead) else
             ise_and i
             [(fun i -> evar_conv_x flags env i CONV c c');
              (fun i -> exact_ise_stack2 env i (evar_conv_x flags) sk1 sk2)]
@@ -1066,25 +1107,36 @@ and evar_eqappr_x ?(rhs_is_already_stuck = false) flags env evd pbty
 
         (* Catch the p.c ~= p c' cases *)
         | Proj (p,_,c), Const (p',u) when QConstant.equal env (Projection.constant p) p' ->
-          let res =
-            try Some (destApp evd (Retyping.expand_projection env evd p c []))
-            with Retyping.RetypeError _ -> None
-          in
-            (match res with
-            | Some (f1,args1) ->
-              evar_eqappr_x flags env evd pbty keys None (f1,Stack.append_app args1 sk1)
-                appr2
-            | None -> UnifFailure (evd,NotSameHead))
+          let f0l i =
+            let no_red =
+              match kind i c with
+              | App (h,_) when isConstruct i h -> false
+              | Construct _ -> false
+              | _ -> true in
+            if no_red then UnifFailure (evd,NotSameHead) else
+            let out1 = whd_betaiota_deltazeta_for_iota_state flags.open_ts env i vsk1' in
+            evar_eqappr_x flags env i pbty keys None out1 appr2 in
+          let f1 evd =
+            match destApp evd (Retyping.expand_projection env evd p c []) with
+            | exception Retyping.RetypeError _ -> UnifFailure (evd,NotSameHead)
+            | f1, args1 -> evar_eqappr_x flags env evd pbty keys None (f1,Stack.append_app args1 sk1) appr2 in
+          ise_try evd [f0l; f1]
 
         | Const (p,u), Proj (p',_,c') when QConstant.equal env p (Projection.constant p') ->
-          let res =
-            try Some (destApp evd (Retyping.expand_projection env evd p' c' []))
-            with Retyping.RetypeError _ -> None
-          in
-            (match res with
-            | Some (f2,args2) ->
-              evar_eqappr_x flags env evd pbty keys None appr1 (f2,Stack.append_app args2 sk2)
-            | None -> UnifFailure (evd,NotSameHead))
+          let f0r i =
+            let no_red =
+              match kind i c' with
+              | App (h,_) when isConstruct i h -> false
+              | Construct _ -> false
+              | _ -> true in
+            if no_red then UnifFailure (evd,NotSameHead) else
+            let out2 = whd_betaiota_deltazeta_for_iota_state flags.open_ts env i vsk2' in
+            evar_eqappr_x flags env i pbty keys None appr1 out2 in
+          let f1 evd =
+            match destApp evd (Retyping.expand_projection env evd p' c' []) with
+            | exception Retyping.RetypeError _ -> UnifFailure (evd,NotSameHead)
+            | f2, args2 -> evar_eqappr_x flags env evd pbty keys None appr1 (f2,Stack.append_app args2 sk2) in
+          ise_try evd [f0r; f1]
 
         | _, Lambda _ when sk2 <> [] && not (EConstr.isLambda evd term1) ->
             evar_eqappr_x flags env evd pbty keys None appr1
