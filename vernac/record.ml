@@ -984,8 +984,8 @@ let declare_class ?mode declared =
     cl_projs = projs;
   }
   in
-  Classes.add_class k;
-  set_class_mode impl mode params
+  set_class_mode impl mode params;
+  Classes.add_class k
 
 let add_constant_class cst =
   let env = Global.env () in
