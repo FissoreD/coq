@@ -917,7 +917,7 @@ let declare_class_constant entry (data:Data.t) =
 let set_class_mode ref mode ctx =
   let modes =
     match mode with
-    | Some (Some m) -> Some m
+    | Some m -> Some m
     | _ ->
       let ctxl = Context.Rel.nhyps ctx in
       let def = typeclasses_default_mode () in
@@ -984,8 +984,8 @@ let declare_class ?mode declared =
     cl_projs = projs;
   }
   in
-  set_class_mode impl mode params;
-  Classes.add_class k
+  Classes.add_class ?mode k;
+  set_class_mode impl mode params
 
 let add_constant_class cst =
   let env = Global.env () in
@@ -1072,7 +1072,7 @@ let definition_structure ~flags udecl kind ~primitive_proj (records : Ast.t list
       let structure = interp_structure_core entry ~projections_kind ~indlocs data in
       declare_structure structure
   in
-  if kind_class kind <> NotClass then declare_class ~mode:flags.mode declared;
+  if kind_class kind <> NotClass then declare_class ?mode:flags.mode declared;
   inds
 
 module Internal = struct
